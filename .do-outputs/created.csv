@@ -1,0 +1,8 @@
+vpc_name,cidr,vpc_id,droplet_name,droplet_id,action
+vpc-10-0-0-0-27,10.0.0.0/27,6e59cc9c-73f9-4d62-9b23-eb71ad8b3037,vpc-10-0-0-0-27-node1,,droplet-create-failed
+vpc-10-0-0-0-27,10.0.0.0/27,6e59cc9c-73f9-4d62-9b23-eb71ad8b3037,vpc-10-0-0-0-27-node2,,droplet-create-failed
+vpc-10-0-0-32-27,10.0.0.32/27,978e54e7-82d3-4cd0-9fcf-f7c970015ac6,vpc-10-0-0-32-27-node1,,droplet-create-failed
+vpc-10-0-0-32-27,10.0.0.32/27,978e54e7-82d3-4cd0-9fcf-f7c970015ac6,vpc-10-0-0-32-27-node2,,droplet-create-failed
+vpc-10-0-0-64-27,10.0.0.64/27,e84d8364-b760-4625-82e2-83dd430cc09e,vpc-10-0-0-64-27-node1,,droplet-create-failed
+vpc-10-0-0-64-27,10.0.0.64/27,e84d8364-b760-4625-82e2-83dd430cc09e,vpc-10-0-0-64-27-node2,,droplet-create-failed
+vpc-10-0-0-96-29,10.0.0.96/29,, , ,skipped-overlap

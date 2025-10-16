@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${DIGITALOCEAN_TOKEN:?Define DIGITALOCEAN_TOKEN env var}"
+: "${REGION:=nyc3}"
+: "${IMAGE:=ubuntu-22-04-x64}"
+: "${SIZE:=s-1vcpu-1gb}"
+: "${SSH_KEY_ID:?Define SSH_KEY_ID env var (id or fingerprint)}"
+CIDR_FILE="${1:-cidrs.txt}"
+
+api_post() {
+  local url="$1"; shift
+  curl -s -X POST -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
+    -d "$@" "https://api.digitalocean.com/v2${url}"
+}
+
+api_get() {
+  local url="$1"
+  curl -s -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" "https://api.digitalocean.com/v2${url}"
+}
+
+mkdir -p .do-outputs
+echo "vpc_name,cidr,vpc_id,droplet_name,droplet_id,action" > .do-outputs/created.csv
+
+EXISTING_VPCS_RAW=$(api_get /vpcs)
+
+while IFS= read -r cidr || [ -n "$cidr" ]; do
+  [[ -z "$cidr" ]] && continue
+  [[ "$cidr" =~ ^# ]] && continue
+
+  safe_name=$(echo "$cidr" | tr '/.' '-' | tr -s '-' | sed 's/^-//; s/-$//')
+  vpc_name="vpc-${safe_name}"
+
+  reuse_vpc_id=""
+  skip_due_overlap=false
+
+  echo "$EXISTING_VPCS_RAW" | jq -c '.vpcs[]' | while read -r vpcjson; do
+    existing_ip=$(echo "$vpcjson" | jq -r '.ip_range')
+    existing_id=$(echo "$vpcjson" | jq -r '.id')
+    existing_name=$(echo "$vpcjson" | jq -r '.name')
+
+    overlap=$(python3 - <<PY
+import ipaddress
+a = ipaddress.ip_network("$cidr")
+b = ipaddress.ip_network("$existing_ip")
+print(a.overlaps(b))
+PY
+)
+    if [ "$overlap" = "True" ]; then
+      if [ "$existing_ip" = "$cidr" ]; then
+        echo "-> Existe VPC con exactamente el mismo rango: $existing_name $existing_ip (id: $existing_id)"
+        printf "%s" "$existing_id" > /tmp/_reuse_vpc_id
+        break
+      else
+        echo "-> Encontrado SOLAPAMIENTO con VPC existente: $existing_name $existing_ip (id: $existing_id). No puedo crear $cidr para evitar conflicto."
+        touch /tmp/_skip_overlap
+        break
+      fi
+    fi
+  done
+
+  if [ -f /tmp/_reuse_vpc_id ]; then
+    reuse_vpc_id=$(cat /tmp/_reuse_vpc_id)
+    rm -f /tmp/_reuse_vpc_id
+  fi
+  if [ -f /tmp/_skip_overlap ]; then
+    echo "Saltando $cidr por solapamiento (ver mensaje anterior)."
+    rm -f /tmp/_skip_overlap
+    echo "${vpc_name},${cidr},, , ,skipped-overlap" >> .do-outputs/created.csv
+    continue
+  fi
+
+  if [ -n "$reuse_vpc_id" ]; then
+    vpc_id="$reuse_vpc_id"
+    action="reused"
+  else
+    vpc_response=$(api_post /vpcs "$(jq -nc --arg name "$vpc_name" \
+      --arg region "$REGION" --arg ip_range "$cidr" \
+      --arg desc "VPC creada por script para CIDR $cidr" \
+      '{name:$name,region:$region,ip_range:$ip_range,description:$desc}')")
+
+    vpc_id=$(echo "$vpc_response" | jq -r '.vpc.id // empty')
+    if [ -z "$vpc_id" ]; then
+      echo "Error creando VPC. Respuesta completa:"
+      echo "$vpc_response" | jq
+      echo "${vpc_name},${cidr},, , ,create-vpc-failed" >> .do-outputs/created.csv
+      continue
+    fi
+    action="created"
+    EXISTING_VPCS_RAW=$(api_get /vpcs)
+  fi
+
+  for n in 1 2; do
+    droplet_name="${vpc_name}-node${n}"
+    create_payload=$(jq -nc \
+      --arg name "$droplet_name" \
+      --arg region "$REGION" \
+      --arg size "$SIZE" \
+      --arg image "$IMAGE" \
+      --arg vpc "$vpc_id" \
+      --argjson keys "[\"$SSH_KEY_ID\"]" \
+      '{name:$name,region:$region,size:$size,image:$image,vpc_uuid:$vpc,ssh_keys:$keys,backups:false,ipv6:false,monitoring:true,tags:["project-startup"]}')
+    droplet_resp=$(api_post /droplets "$create_payload")
+    did=$(echo "$droplet_resp" | jq -r '.droplet.id // empty')
+    if [ -z "$did" ]; then
+      echo "Error creando droplet. Respuesta:"
+      echo "$droplet_resp" | jq
+      echo "${vpc_name},${cidr},${vpc_id},${droplet_name},,droplet-create-failed" >> .do-outputs/created.csv
+      continue
+    fi
+    echo "Droplet creado id=$did"
+    echo "${vpc_name},${cidr},${vpc_id},${droplet_name},${did},${action}" >> .do-outputs/created.csv
+  done
+
+done < "$CIDR_FILE"
+
+echo "Revisa la salida en .do-outputs/created.csv"
